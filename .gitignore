@@ -1,0 +1,7 @@
+project/venv/
+project/__pycache__/
+project/results/
+project/*.pyc
+__pycache__/
+*.pyc
+.idea/
