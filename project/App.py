@@ -489,7 +489,7 @@ NYU_STD  = [0.229, 0.224, 0.225]
 MAX_DEPTH = 10.0
 NYU_FX, NYU_FY = 518.8579, 519.4696
 NYU_CX, NYU_CY = 325.5824, 253.7362
-CHECKPOINT_PATH = "checkpoints/best_model.pth"
+CHECKPOINT_PATH = "project/checkpoints/best_model.pth"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model loading (cached)
