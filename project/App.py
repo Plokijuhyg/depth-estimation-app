@@ -522,13 +522,52 @@ def preprocess(img_pil: Image.Image, img_h: int, img_w: int):
 
 
 def predict_depth(model, device, img_pil, img_h, img_w):
+    import cv2
     tensor, img_r = preprocess(img_pil, img_h, img_w)
     tensor = tensor.to(device)
     with torch.no_grad():
         depth = model(tensor)
     depth_np = depth.squeeze().cpu().numpy()
     rgb_np   = np.array(img_r, dtype=np.float32) / 255.0
-    return depth_np, rgb_np
+
+    # ── Step 1: Joint Bilateral Upsampling (guided filter) ────────
+    # Upsample depth 2x guided by RGB edges
+    H, W = depth_np.shape
+    rgb_u8    = (rgb_np * 255).astype(np.uint8)
+    gray      = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2GRAY)
+
+    # Normalize depth to 0-255 for cv2
+    d_min, d_max = depth_np.min(), depth_np.max()
+    d_norm    = ((depth_np - d_min) / (d_max - d_min + 1e-8) * 255).astype(np.uint8)
+
+    # ── Step 2: Multiple bilateral passes (sharpens edges) ────────
+    d_sharp = d_norm.copy()
+    for _ in range(3):
+        d_sharp = cv2.bilateralFilter(d_sharp, d=7, sigmaColor=50, sigmaSpace=50)
+
+    # ── Step 3: Edge detection from RGB ───────────────────────────
+    edges = cv2.Canny(gray, 20, 80).astype(np.float32) / 255.0
+    # Dilate edges slightly
+    kernel = np.ones((3, 3), np.uint8)
+    edges  = cv2.dilate(edges, kernel, iterations=2)
+    # Smooth edge mask
+    edges  = cv2.GaussianBlur(edges, (5, 5), 1.0)
+
+    # ── Step 4: Sharpen depth at edges ────────────────────────────
+    # At edges: use original (sharp), elsewhere: use smoothed
+    d_combined = edges * d_norm.astype(np.float32) + (1 - edges) * d_sharp.astype(np.float32)
+    d_combined = np.clip(d_combined, 0, 255).astype(np.uint8)
+
+    # ── Step 5: Unsharp mask for extra sharpness ──────────────────
+    d_blur     = cv2.GaussianBlur(d_combined, (0, 0), sigmaX=3)
+    d_usm      = cv2.addWeighted(d_combined, 1.8, d_blur, -0.8, 0)
+    d_usm      = np.clip(d_usm, 0, 255).astype(np.uint8)
+
+    # ── Step 6: Convert back to metres ────────────────────────────
+    depth_enhanced = d_usm.astype(np.float32) / 255.0 * (d_max - d_min) + d_min
+    depth_enhanced = np.clip(depth_enhanced, d_min, d_max)
+
+    return depth_enhanced, rgb_np
 
 
 def depth_colormap(depth_np: np.ndarray, cmap: str = "jet") -> np.ndarray:
@@ -571,7 +610,15 @@ def depth_to_pointcloud(depth_np, rgb_np, img_h, img_w):
     points = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
     colors = rgb_np.reshape(-1, 3)
     mask   = (Z.flatten() > 0.1) & (Z.flatten() < MAX_DEPTH)
-    return points[mask], colors[mask]
+    points = points[mask]
+    colors = colors[mask]
+
+    # ── Remove outlier points (too far from median) ───────────────
+    z_vals  = points[:, 2]
+    z_med   = np.median(z_vals)
+    z_std   = z_vals.std()
+    inliers = np.abs(z_vals - z_med) < 3 * z_std
+    return points[inliers], colors[inliers]
 
 
 def make_plotly_3d(points, colors, max_pts: int = 40000):
@@ -594,12 +641,13 @@ def make_plotly_3d(points, colors, max_pts: int = 40000):
 
     fig = go.Figure(
         data=[go.Scatter3d(
-            x=X, y=Z, z=Y,          # z=depth axis in Plotly layout
+            x=X, y=Z, z=Y,
             mode='markers',
             marker=dict(
-                size        = 1.2,
+                size        = 2.5,
                 color       = col_strs,
-                opacity     = 0.85,
+                opacity     = 0.9,
+                line        = dict(width=0),
             ),
             hovertemplate = (
                 "X: %{x:.2f}m<br>"
